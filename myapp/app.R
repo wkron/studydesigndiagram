@@ -198,7 +198,7 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$remline, {
-    if (vnums()  1) {
+    if (vnums() > 1) {
       removeUI(selector = paste0("#index", vnums()))
       vnums(vnums() - 1)
     }
