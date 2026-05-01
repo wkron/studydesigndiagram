@@ -3,25 +3,30 @@ library(ggplot2)
 library(jsonlite)
 library(svglite)
 library(base64enc)
+library(ggfittext)
+library(grid)
 
 source("make-diagram.R")
 
 license <- '<p xmlns:dct="http://purl.org/dc/terms/" xmlns:cc="http://creativecommons.org/ns#" class="license-text">This work is licensed under <a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0<img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/cc.svg?ref=chooser-v1" /><img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/by.svg?ref=chooser-v1" /><img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/nc.svg?ref=chooser-v1" /><img style="height:22px!important;margin-left:3px;vertical-align:text-bottom;" src="https://mirrors.creativecommons.org/presskit/icons/sa.svg?ref=chooser-v1"/></a></p>'
 
 anchor1 <- c(
-  "Cohort entry date",
-  "ED"
+  "Cohort entry date" = "Cohort entry date",
+  "Event date"        = "Event date"
 )
 
 anchor2 <- c(
-  "Please choose",
-  "Follow-up",
-  "Eligibility",
-  "Exclusion",
-  "Covariates",
-  "Washout",
-  "Exposure"
+  "Please choose" = "",
+  "Follow-up"     = "Follow-up window",
+  "Eligibility"   = "Eligibility assessment window",
+  "Exclusion"     = "Exclusion assessment window",
+  "Covariates"    = "Covariate assessment window",
+  "Washout"       = "Washout window",
+  "Exposure"      = "Exposure assessment window"
 )
+
+
+
 
 make_row_inputs <- function(x, atype = 1, s = 0, e = 0) {
   select_default <- if (atype >= 1 && atype <= length(anchor2)) anchor2[[atype]] else anchor2[[1]]
@@ -41,11 +46,12 @@ make_row_inputs <- function(x, atype = 1, s = 0, e = 0) {
           2,
           tags$div(
             title = "Label to be displayed on the first line of the box",
-            selectInput(
+            selectizeInput(
               paste0("lbl1_", x),
               "Second-order anchor",
               choices = anchor2,
-              selected = select_default
+              selected = select_default,
+              options = list(create = TRUE)
             )
           )
         ),
@@ -68,6 +74,10 @@ make_row_inputs <- function(x, atype = 1, s = 0, e = 0) {
           tags$div(
             title = "End of interval in days (also placement on the x-axis)",
             numericInput(paste0("end", x), "End", value = e)
+          ),
+          tags$div(
+            title = "Check if the end of the interval is indefinite (open-ended)",
+            checkboxInput(paste0("end_inf_", x), label = "Indefinite", value = FALSE)
           )
         ),
         column(
@@ -116,11 +126,12 @@ make_index_inputs <- function(x, selected = NULL, idx = 0) {
           4,
           tags$div(
             title = "First order anchor (label to be displayed above vertical line)",
-            selectInput(
+            selectizeInput(
               paste0("indexlbl1_", x),
               "First-order anchors",
               choices = anchor1,
-              selected = select_default
+              selected = select_default,
+              options = list(create = TRUE)  # allows custom user input
             )
           )
         ),
@@ -128,7 +139,7 @@ make_index_inputs <- function(x, selected = NULL, idx = 0) {
           4,
           tags$div(
             title = "Label for vertical line (line two)",
-            textInput(paste0("indexlbl2_", x), "Optional label", value = "")
+            textInput(paste0("indexlbl2_", x), "Optional sublabel", value = "")
           )
         ),
         column(
@@ -144,6 +155,19 @@ make_index_inputs <- function(x, selected = NULL, idx = 0) {
 }
 
 ui <- fluidPage(
+
+  tags$head(tags$style(HTML("
+  .aligned-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+  }
+  .aligned-col {
+    flex: 1;
+    min-width: 0;
+  }
+"))),
+  
   tags$head(
     tags$script(HTML('
       (function () {
@@ -154,11 +178,18 @@ ui <- fluidPage(
         function loadSavedProjectOnConnect() {
           var saved = localStorage.getItem("longdiag_state");
           if (saved) {
-            Shiny.setInputValue("restore_state", saved, {priority: "event"});
+            Shiny.setInputValue("restore_state_cookie", saved, {priority: "event"});
           }
         }
 
-        document.addEventListener("shiny:connected", loadSavedProjectOnConnect);
+        // Add this instead:
+        Shiny.addCustomMessageHandler("request_cookie_state", function(_) {
+          var saved = localStorage.getItem("longdiag_state");
+          console.log("Server requested cookie, found:", saved ? "yes" : "null");
+          if (saved) {
+            Shiny.setInputValue("restore_state_cookie", saved, {priority: "event"});
+          }
+        });
 
         Shiny.addCustomMessageHandler("save_state", function (state) {
           saveProjectToStorage(JSON.stringify(state));
@@ -175,7 +206,7 @@ ui <- fluidPage(
           reader.onload = function (ev) {
             var text = ev.target.result;
             saveProjectToStorage(text);
-            Shiny.setInputValue("restore_state", text, {priority: "event"});
+            Shiny.setInputValue("restore_state_upload", text, {priority: "event"});
           };
           reader.readAsText(file);
         });
@@ -230,19 +261,53 @@ ui <- fluidPage(
             tags$div(id = "row_container", make_row_inputs(1))
           ),
           tabPanel(
+            
             "Output",
             br(),
-            p("Adjust text size if necessary.", style = "color:grey"),
-            fluidRow(
-              column(2, selectInput("aratio", "Aspect ratio", choices = c("4:3" = 1, "16:9" = 2), selected = 1)),
-              column(2, numericInput("textsize", "Text size", value = 14, min = 4, max = 32)),
-              column(2, numericInput("xpad", "Padding (x-axis)", value = 50, min = 0, max = 300)),
-              column(2, br(), uiOutput("download_link")),
-              column(2, br(), uiOutput("download_link_svg"))
+            p("Adjust text size if necessary. End of x-axis should be specified if any windows are set to be indefinite.", style = "color:grey"),
+            div(class = "aligned-row",
+              div(class = "aligned-col",
+                  selectInput("aratio", "Aspect ratio",
+                              choices = c("4:3" = 1, "16:9" = 2), selected = 1)
+              ),
+              div(class = "aligned-col",
+                  numericInput("textsize", "Text size", value = 14, min = 4, max = 32)
+              ),
+              div(class = "aligned-col",
+                  numericInput("xpad", "Padding (x-axis)", value = 50, min = 0, max = 300)
+              ),
+              div(class = "aligned-col",
+                  numericInput("xlim_min", "Start of x-axis (optional)", value = NA)
+              ),
+              div(class = "aligned-col",
+                  numericInput("xlim_max", "End of x-axis (optional)", value = NA)
+              )
             ),
-            fluidRow(
-              column(2, br(), tags$button("Save project", onclick = "saveProject()", class = "btn btn-default")),
-              column(2, br(), fileInput("load_project", "Load project", accept = ".json"))
+             div(
+              style = "display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start;",
+
+              div(
+                tags$label("\u00a0", style = "display: block;"),
+                tags$button("Download project file",
+                  onclick = "saveProject()",
+                  class = "btn btn-default"
+                )
+              ),
+            
+              div(
+                style = "min-width: 180px;",
+                fileInput("load_project", "Load project file", accept = ".json", width = "100%")
+              ),
+            
+              div(
+                tags$label("\u00a0", style = "display: block;"),
+                uiOutput("download_link")
+              ),
+            
+              div(
+                tags$label("\u00a0", style = "display: block;"),
+                uiOutput("download_link_svg")
+              )
             )
           )
         )
@@ -279,6 +344,8 @@ server <- function(input, output, session) {
       textsize = input$textsize,
       xpad = input$xpad,
       aratio = input$aratio,
+      xlim_min = input$xlim_min,
+      xlim_max = input$xlim_max,
       rows = lapply(seq_len(rownums()), function(x) {
         list(
           line = input[[paste0("line", x)]],
@@ -286,6 +353,7 @@ server <- function(input, output, session) {
           lbl2 = input[[paste0("lbl2_", x)]],
           start = input[[paste0("start", x)]],
           end = input[[paste0("end", x)]],
+          end_inf = input[[paste0("end_inf_", x)]],
           start_lbl = input[[paste0("start_lbl", x)]],
           end_lbl = input[[paste0("end_lbl", x)]],
           boxcolor = input[[paste0("boxcolor", x)]],
@@ -302,10 +370,29 @@ server <- function(input, output, session) {
     )
   }) |> debounce(1000)
 
+  
+  session$onFlushed(function() {
+    session$sendCustomMessage("request_cookie_state", list())
+  }, once = TRUE)
+  
   observeEvent(collect_state(), {
     if (is_restoring()) return()
     session$sendCustomMessage("save_state", collect_state())
   }, ignoreInit = TRUE)
+
+  # File upload: clear UI first, then restore (your existing behaviour)
+  observeEvent(input$restore_state_upload, {
+    req(input$restore_state_upload)
+    state <- fromJSON(input$restore_state_upload, simplifyVector = FALSE)
+    restore_state(state)
+  }, ignoreInit = TRUE)
+
+  # Cookie: UI already exists from initial render — just update values
+  observeEvent(input$restore_state_cookie, {
+    req(input$restore_state_cookie)
+    state <- fromJSON(input$restore_state_cookie, simplifyVector = FALSE)
+    restore_state(state)
+  }, ignoreInit = FALSE)
 
   restore_state <- function(state) {
     if (!is.list(state)) return()
@@ -319,6 +406,8 @@ server <- function(input, output, session) {
 
     updateNumericInput(session, "textsize", value = as.numeric(state$textsize %||% 14))
     updateNumericInput(session, "xpad", value = as.numeric(state$xpad %||% 50))
+    updateNumericInput(session, "xlim_min", value = as.numeric(state$xlim_min))
+    updateNumericInput(session, "xlim_max", value = as.numeric(state$xlim_max))
     updateSelectInput(session, "aratio", selected = as.character(state$aratio %||% 1))
 
     removeUI(selector = "#row_container > div", multiple = TRUE, immediate = TRUE)
@@ -328,10 +417,10 @@ server <- function(input, output, session) {
     idx_count <- max(1, n_idx)
 
     for (i in seq_len(row_count)) {
-      insertUI(selector = "#row_container", where = "beforeEnd", ui = make_row_inputs(i), immediate = TRUE)
+    insertUI("#row_container",   "beforeEnd", make_row_inputs(i),   immediate = TRUE)
     }
     for (i in seq_len(idx_count)) {
-      insertUI(selector = "#index_container", where = "beforeEnd", ui = make_index_inputs(i), immediate = TRUE)
+      insertUI("#index_container", "beforeEnd", make_index_inputs(i), immediate = TRUE)
     }
 
     rownums(row_count)
@@ -342,10 +431,17 @@ server <- function(input, output, session) {
         for (x in seq_len(n_rows)) {
           r <- state$rows[[x]]
           updateNumericInput(session, paste0("line", x), value = as.numeric(r$line))
-          updateSelectInput(session, paste0("lbl1_", x), selected = as.character(r$lbl1))
+          lbl1_val <- as.character(r$lbl1)
+          lbl1_choices <- if (lbl1_val %in% anchor2) anchor2 else c(anchor2, setNames(lbl1_val, lbl1_val))
+          updateSelectizeInput(session, paste0("lbl1_", x),
+            choices  = lbl1_choices,
+            selected = lbl1_val,
+            options  = list(create = TRUE)
+          )
           updateTextInput(session, paste0("lbl2_", x), value = as.character(r$lbl2))
           updateNumericInput(session, paste0("start", x), value = as.numeric(r$start))
           updateNumericInput(session, paste0("end", x), value = as.numeric(r$end))
+          updateCheckboxInput(session, paste0("end_inf_", x), value = isTRUE(r$end_inf))
           updateTextInput(session, paste0("start_lbl", x), value = as.character(r$start_lbl))
           updateTextInput(session, paste0("end_lbl", x), value = as.character(r$end_lbl))
           updateNumericInput(session, paste0("boxcolor", x), value = as.numeric(r$boxcolor))
@@ -356,7 +452,13 @@ server <- function(input, output, session) {
       if (n_idx > 0) {
         for (x in seq_len(n_idx)) {
           idx <- state$indices[[x]]
-          updateSelectInput(session, paste0("indexlbl1_", x), selected = as.character(idx$indexlbl1))
+          lbl1_val <- as.character(idx$indexlbl1)
+          lbl1_choices <- if (lbl1_val %in% anchor1) anchor1 else c(anchor1, setNames(lbl1_val, lbl1_val))
+          updateSelectizeInput(session, paste0("indexlbl1_", x),
+            choices  = lbl1_choices,
+            selected = lbl1_val,
+            options  = list(create = TRUE)
+          )
           updateTextInput(session, paste0("indexlbl2_", x), value = as.character(idx$indexlbl2))
           updateNumericInput(session, paste0("index", x), value = as.numeric(idx$index))
         }
@@ -368,7 +470,7 @@ server <- function(input, output, session) {
     req(input$restore_state)
     state <- fromJSON(input$restore_state, simplifyVector = FALSE)
     restore_state(state)
-  }, ignoreInit = TRUE)
+  }, ignoreInit = FALSE)
 
   observeEvent(input$add, {
     new_id <- rownums() + 1
@@ -426,6 +528,9 @@ server <- function(input, output, session) {
       outside_box = vapply(idx, function(x) input[[paste0("outbox", x)]], character(1)),
       start = vapply(idx, function(x) input[[paste0("start", x)]], numeric(1)),
       end = vapply(idx, function(x) input[[paste0("end", x)]], numeric(1)),
+      end_inf = vapply(idx, function(x) {
+        isTRUE(input[[paste0("end_inf_", x)]])
+      }, logical(1)),
       start_lbl = vapply(idx, function(x) input[[paste0("start_lbl", x)]], character(1)),
       end_lbl = vapply(idx, function(x) input[[paste0("end_lbl", x)]], character(1)),
       color = vapply(idx, function(x) input[[paste0("boxcolor", x)]], numeric(1)),
@@ -448,7 +553,9 @@ server <- function(input, output, session) {
       ggdf(),
       indf(),
       txt_size = input$textsize - 2,
-      addpad = input$xpad
+      addpad = input$xpad,
+      xlim_min = input$xlim_min,
+      xlim_max = input$xlim_max
     )
   })
 
@@ -470,7 +577,7 @@ server <- function(input, output, session) {
     )
 
     href <- paste0("data:application/pdf;base64,", base64encode(tmp))
-    tags$a(href = href, download = "diagram.pdf", class = "btn btn-default", "Download .pdf")
+    tags$a(href = href, download = "diagram.pdf", class = "btn btn-default", "Print .pdf")
   })
 
   output$download_link_svg <- renderUI({
@@ -487,7 +594,7 @@ server <- function(input, output, session) {
     )
 
     href <- paste0("data:image/svg+xml;base64,", base64encode(tmp))
-    tags$a(href = href, download = "diagram.svg", class = "btn btn-default", "Download .svg")
+    tags$a(href = href, download = "diagram.svg", class = "btn btn-default", "Print .svg")
   })
 }
 
